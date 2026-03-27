@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "websocket messenger"
+version = "0.1.0"
+description = ""
+authors = ["Sladkiy-bubalex <shadow.ru_93@mail.ru>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.13,<4.0"
+fastapi = "^0.135.2"
+uvicorn = {extras = ["standard"], version = "^0.42.0"}
+jinja2 = "^3.1.6"
+loguru = "^0.7.3"
+
+[[tool.poetry.source]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
