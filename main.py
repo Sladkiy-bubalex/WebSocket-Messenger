@@ -1,9 +1,13 @@
 import json
+import weakref
+import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.websockets import WebSocketState
 from dataclasses import dataclass
 from loguru import logger
+from typing import Optional
 
 
 app = FastAPI()
@@ -17,6 +21,7 @@ class ConnectionInfo:
     """
     websocket: WebSocket
     message_counter: int = 0
+    manager_ref: Optional[weakref.ReferenceType] = None
     
     def get_next_number(self) -> int:
         """Увеличивает счетчик и возвращает новое значение"""
@@ -29,34 +34,45 @@ class ConnectionInfo:
 
 
 class ConnectionManager:
-    """
-    Менеджер WebSocket соединений
-    """
-
     def __init__(self):
-        self._connections: dict[WebSocket, ConnectionInfo] = {}
+        self._connections: dict[int, ConnectionInfo] = {}
 
     async def connect(self, websocket: WebSocket) -> ConnectionInfo:
-        """
-        Принимает новое WebSocket соединение и возвращает информацию о нем
-        """
         await websocket.accept()
+
         connection_info = ConnectionInfo(websocket=websocket)
-        self._connections[websocket] = connection_info
+        self._connections[id(websocket)] = connection_info
+
+        logger.info(f"[CONNECT] Active connections: {self.active_count}")
         return connection_info
 
-    def disconnect(self, websocket: WebSocket):
-        """Удаляет WebSocket соединение"""
-        if websocket in self._connections:
-            del self._connections[websocket]
+    async def disconnect(self, websocket: WebSocket):
+        ws_id = id(websocket)
 
-    async def send_message(self, message: dict, websocket: WebSocket):
-        """Отправляет JSON сообщение конкретному клиенту"""
-        await websocket.send_json(message)
+        if ws_id in self._connections:
+            del self._connections[ws_id]
+
+        if websocket.client_state == WebSocketState.CONNECTED:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+        logger.info(f"[DISCONNECT] Active connections: {self.active_count}")
+
+    async def send_message(self, message: dict, websocket: WebSocket) -> bool:
+        if id(websocket) not in self._connections:
+            return False
+
+        try:
+            await websocket.send_json(message)
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка отправки: {e}")
+            await self.disconnect(websocket)
+            return False
 
     @property
     def active_count(self) -> int:
-        """Возвращает количество активных соединений"""
         return len(self._connections)
 
 
@@ -74,34 +90,39 @@ async def get_page(request: Request):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket эндпоинт для обмена сообщениями"""
-
     connection_info = await manager.connect(websocket)
-    logger.info(f"Клиент подключен. Всего соединений: {manager.active_count}")
 
     try:
         while True:
             data = await websocket.receive_text()
+            message_data = json.loads(data)
 
-            try:
-                message_data = json.loads(data)
-                user_message = message_data.get("message", "")
+            if message_data.get("type") == "ping":
+                continue
 
-                if user_message:
-                    message_number = connection_info.get_next_number()
+            user_message = message_data.get("message", "").strip()
 
-                    response = {
-                        "number": message_number,
-                        "text": user_message
-                    }
+            if not user_message:
+                continue
 
-                    await manager.send_message(response, websocket)
+            if len(user_message) > 1000:
+                continue
 
-            except json.JSONDecodeError:
-                logger.error(f"Получен некорректный JSON: {data}")
+            message_number = connection_info.get_next_number()
+
+            response = {
+                "number": message_number,
+                "text": user_message,
+                "timestamp": time.time()
+            }
+
+            await manager.send_message(response, websocket)
 
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        logger.info(
-            f"Клиент отключен. Осталось соединений: {manager.active_count}"
-        )
+        logger.info(f"Клиент отключился в WebSocket {websocket}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в WebSocket {websocket}: {e}")
+
+    finally:
+        await manager.disconnect(websocket)

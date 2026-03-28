@@ -207,128 +207,198 @@
     </div>
 
     <script>
-        let ws = null;
-        let reconnectAttempts = 0;
-        const maxReconnectAttempts = 5;
+    class WebSocketClient {
+        constructor({ url, onMessage, onStatusChange }) {
+            this.url = url;
+            this.onMessage = onMessage;
+            this.onStatusChange = onStatusChange;
 
-        const messagesContainer = document.getElementById('messagesContainer');
-        const messageForm = document.getElementById('messageForm');
-        const messageInput = document.getElementById('messageInput');
-        const sendButton = document.getElementById('sendButton');
-        const statusDot = document.getElementById('statusDot');
-        const statusText = document.getElementById('statusText');
+            this.ws = null;
+            this.reconnectAttempts = 0;
+            this.maxReconnectAttempts = 5;
+            this.isConnecting = false;
 
-        function updateStatus(connected) {
-            if (connected) {
-                statusDot.style.backgroundColor = '#4ade80';
-                statusText.textContent = 'Подключено';
-                statusText.className = 'connected';
-                sendButton.disabled = false;
-                messageInput.disabled = false;
-            } else {
-                statusDot.style.backgroundColor = '#f87171';
-                statusText.textContent = 'Отключено';
-                statusText.className = 'disconnected';
-                sendButton.disabled = true;
-                messageInput.disabled = true;
-            }
+            this.pingInterval = null;
+            this.reconnectTimeout = null;
         }
 
-        function addMessageToList(number, text) {
-            const emptyMessage = messagesContainer.querySelector('.empty-messages');
-            if (emptyMessage && messagesContainer.children.length === 1) {
-                emptyMessage.remove();
-            }
+        connect() {
+            if (this.isConnecting) return;
 
-            const messageDiv = document.createElement('div');
-            messageDiv.className = 'message';
+            this.isConnecting = true;
+            this.ws = new WebSocket(this.url);
 
-            const numberSpan = document.createElement('div');
-            numberSpan.className = 'message-number';
-            numberSpan.textContent = number;
+            this.ws.onopen = () => {
+                this.isConnecting = false;
+                this.reconnectAttempts = 0;
+                this.onStatusChange(true);
 
-            const textSpan = document.createElement('div');
-            textSpan.className = 'message-text';
-            textSpan.textContent = text;
-
-            messageDiv.appendChild(numberSpan);
-            messageDiv.appendChild(textSpan);
-
-            messagesContainer.appendChild(messageDiv);
-
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
-
-        function connectWebSocket() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
-
-            ws = new WebSocket(wsUrl);
-
-            ws.onopen = function() {
-                console.log('WebSocket подключен');
-                updateStatus(true);
-                reconnectAttempts = 0;
+                // heartbeat
+                this.pingInterval = setInterval(() => {
+                    if (this.ws.readyState === WebSocket.OPEN) {
+                        this.send({ type: 'ping' });
+                    }
+                }, 30000);
             };
 
-            ws.onmessage = function(event) {
+            this.ws.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    addMessageToList(data.number, data.text);
-                } catch (error) {
-                    console.error('Ошибка парсинга сообщения:', error);
+
+                    if (
+                        typeof data === 'object' &&
+                        typeof data.text === 'string' &&
+                        typeof data.number === 'number'
+                    ) {
+                        this.onMessage(data);
+                    }
+                } catch (e) {
+                    console.error('Ошибка парсинга:', e);
                 }
             };
 
-            ws.onerror = function(error) {
+            this.ws.onerror = (error) => {
                 console.error('WebSocket ошибка:', error);
-                updateStatus(false);
+                this.onStatusChange(false);
             };
 
-            ws.onclose = function() {
-                console.log('WebSocket отключен');
-                updateStatus(false);
+            this.ws.onclose = () => {
+                this.cleanup();
+                this.onStatusChange(false);
 
-                if (reconnectAttempts < maxReconnectAttempts) {
-                    reconnectAttempts++;
-                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
-                    console.log(`Попытка переподключения через ${delay}ms...`);
-                    setTimeout(connectWebSocket, delay);
+                if (this.reconnectAttempts < this.maxReconnectAttempts) {
+                    this.reconnectAttempts++;
+
+                    const delay = Math.min(
+                        1000 * Math.pow(2, this.reconnectAttempts),
+                        10000
+                    );
+
+                    this.reconnectTimeout = setTimeout(() => {
+                        this.connect();
+                    }, delay);
                 } else {
-                    statusText.textContent = 'Не удалось подключиться';
+                    this.onStatusChange(false, 'Не удалось подключиться');
                 }
             };
         }
 
-        messageForm.addEventListener('submit', function(e) {
-            e.preventDefault();
+        send(data) {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                this.ws.send(JSON.stringify(data));
+                return true;
+            }
+            return false;
+        }
 
-            const message = messageInput.value.trim();
-
-            if (!message) {
-                return;
+        cleanup() {
+            if (this.pingInterval) {
+                clearInterval(this.pingInterval);
+                this.pingInterval = null;
             }
 
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                const messageData = {
-                    message: message
-                };
-
-                ws.send(JSON.stringify(messageData));
-                messageInput.value = '';
-                messageInput.focus();
-            } else {
-                alert('Нет подключения к серверу. Пожалуйста, подождите переподключения.');
+            if (this.reconnectTimeout) {
+                clearTimeout(this.reconnectTimeout);
+                this.reconnectTimeout = null;
             }
-        });
 
-        connectWebSocket();
+            this.isConnecting = false;
+        }
 
-        window.addEventListener('beforeunload', function() {
-            if (ws) {
-                ws.close();
+        close() {
+            this.cleanup();
+            if (this.ws) {
+                this.ws.close();
             }
-        });
+        }
+    }
+
+    const messagesContainer = document.getElementById('messagesContainer');
+    const messageForm = document.getElementById('messageForm');
+    const messageInput = document.getElementById('messageInput');
+    const sendButton = document.getElementById('sendButton');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+
+    function updateStatus(connected, customText = null) {
+        if (connected) {
+            statusDot.style.backgroundColor = '#4ade80';
+            statusText.textContent = 'Подключено';
+            statusText.className = 'connected';
+            sendButton.disabled = false;
+            messageInput.disabled = false;
+        } else {
+            statusDot.style.backgroundColor = '#f87171';
+            statusText.textContent = customText || 'Отключено';
+            statusText.className = 'disconnected';
+            sendButton.disabled = true;
+            messageInput.disabled = true;
+        }
+    }
+
+    function addMessageToList(number, text) {
+        const emptyMessage = messagesContainer.querySelector('.empty-messages');
+        if (emptyMessage && messagesContainer.children.length === 1) {
+            emptyMessage.remove();
+        }
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = 'message';
+
+        const numberSpan = document.createElement('div');
+        numberSpan.className = 'message-number';
+        numberSpan.textContent = number;
+
+        const textSpan = document.createElement('div');
+        textSpan.className = 'message-text';
+        textSpan.textContent = text;
+
+        messageDiv.appendChild(numberSpan);
+        messageDiv.appendChild(textSpan);
+
+        messagesContainer.appendChild(messageDiv);
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const WS_PATH = '/ws';
+    const wsUrl = `${protocol}//${window.location.host}${WS_PATH}`;
+
+    const client = new WebSocketClient({
+        url: wsUrl,
+        onMessage: (data) => {
+            addMessageToList(data.number, data.text);
+        },
+        onStatusChange: updateStatus
+    });
+
+    client.connect();
+
+    messageForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        const message = messageInput.value.trim();
+
+        if (!message) return;
+
+        if (message.length > 1000) {
+            updateStatus(false, 'Слишком длинное сообщение');
+            return;
+        }
+
+        const sent = client.send({ message });
+
+        if (sent) {
+            messageInput.value = '';
+            messageInput.focus();
+        } else {
+            statusText.textContent = 'Нет соединения...';
+        }
+    });
+
+    window.addEventListener('beforeunload', function() {
+        client.close();
+    });
     </script>
 </body>
 </html>
